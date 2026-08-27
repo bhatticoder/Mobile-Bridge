@@ -9,6 +9,17 @@ from routes import projects, dev, ws
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Filter out benign CancelledError during Uvicorn shutdown on Python 3.14
+class CancelledErrorFilter(logging.Filter):
+    def filter(self, record):
+        if record.exc_info:
+            exc_type, exc_value, exc_traceback = record.exc_info
+            if exc_type.__name__ == 'CancelledError':
+                return False
+        return True
+
+logging.getLogger("uvicorn.error").addFilter(CancelledErrorFilter())
+
 app = FastAPI(title="Antigravity Mobile Remote Controller")
 
 # CORS setup
