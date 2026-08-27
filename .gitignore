@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+backend/venv/
+.venv/
+backend/build/
+backend/dist/
+backend/*.spec
+backend/bin/cloudflared
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/release/
+frontend/android/.gradle/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

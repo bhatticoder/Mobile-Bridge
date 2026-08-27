@@ -1,13 +1,20 @@
 @echo off
-echo Starting Antigravity Hub...
+setlocal
 
-:: Start Backend
-echo Starting FastAPI Backend...
-start "Backend" cmd /k "cd backend && venv\Scripts\activate && uvicorn main:app --host 0.0.0.0 --port 8000"
+echo == Antigravity Hub (web + API + internet tunnel) ==
 
-:: Start Frontend
-echo Starting Vite Frontend...
-start "Frontend" cmd /k "cd frontend && npm run dev -- --host 0.0.0.0"
+echo [1/2] Building web frontend...
+cd frontend
+call npm run build
+if errorlevel 1 goto :error
+cd ..
 
-echo Antigravity Hub is running in separate windows.
-pause
+echo [2/2] Starting backend on port 8000 ...
+cd backend
+call venv\Scripts\activate.bat
+uvicorn main:app --host 0.0.0.0 --port 8000
+goto :eof
+
+:error
+echo BUILD FAILED
+exit /b 1

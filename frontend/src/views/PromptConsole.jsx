@@ -2,26 +2,31 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Send, Cpu, Bug, Lightbulb, PenTool, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
-function PromptConsole({ pin, activeProject }) {
+function PromptConsole({ token, activeProject }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [wsError, setWsError] = useState('');
   const wsRef = useRef(null);
   const messagesEndRef = useRef(null);
 
   const connectWs = () => {
-    if (wsRef.current) return;
-    
+    if (wsRef.current && wsRef.current.readyState <= WebSocket.OPEN) return;
+    setWsError('');
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws/prompt?project=${activeProject}&pin=${pin}`;
-    
+    const wsUrl = `${protocol}//${host}/ws/prompt?project=${encodeURIComponent(activeProject)}&token=${encodeURIComponent(token)}`;
+
     const ws = new WebSocket(wsUrl);
-    
+
+    ws.onopen = () => setWsError('');
+
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      
+
       if (data.type === 'error') {
+        if (/token/i.test(data.content)) setWsError(data.content);
         setMessages(prev => [...prev, { role: 'system', content: `Error: ${data.content}`, type: 'error' }]);
         setIsProcessing(false);
       } else if (data.type === 'thinking') {
@@ -51,18 +56,19 @@ function PromptConsole({ pin, activeProject }) {
     ws.onclose = () => {
       wsRef.current = null;
     };
-    
+
     wsRef.current = ws;
   };
 
   useEffect(() => {
+    setMessages([]);
     connectWs();
     return () => {
       if (wsRef.current) {
         wsRef.current.close();
       }
     };
-  }, [activeProject, pin]);
+  }, [activeProject, token]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -148,7 +154,13 @@ function PromptConsole({ pin, activeProject }) {
         ))}
         <div ref={messagesEndRef} />
       </div>
-      
+
+      {wsError && (
+        <div className="mx-4 mb-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
+          {wsError}
+        </div>
+      )}
+
       {/* Input Area */}
       <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-dark-900 via-dark-900 to-transparent pt-10">
         <div className="relative flex items-end bg-dark-800 border border-dark-600 rounded-2xl p-1 shadow-2xl focus-within:border-brand-500 focus-within:ring-1 focus-within:ring-brand-500/50 transition-all">

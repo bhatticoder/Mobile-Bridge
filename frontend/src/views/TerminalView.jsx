@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Square, RefreshCcw, TerminalSquare } from 'lucide-react';
 
-function TerminalView({ pin, activeProject }) {
+function TerminalView({ token, activeProject }) {
   const [status, setStatus] = useState('stopped'); // running, stopped
   const [logs, setLogs] = useState([]);
   const [command, setCommand] = useState('npm run dev');
@@ -10,7 +10,7 @@ function TerminalView({ pin, activeProject }) {
 
   const fetchStatus = () => {
     fetch(`/api/dev/status?project_name=${activeProject}`, {
-      headers: { 'Authorization': `Bearer ${pin}` }
+      headers: { 'Authorization': `Bearer ${token}` }
     })
     .then(res => res.json())
     .then(data => {
@@ -22,7 +22,7 @@ function TerminalView({ pin, activeProject }) {
 
   const fetchLogs = () => {
     fetch(`/api/dev/logs?project_name=${activeProject}&count=100`, {
-      headers: { 'Authorization': `Bearer ${pin}` }
+      headers: { 'Authorization': `Bearer ${token}` }
     })
     .then(res => res.json())
     .then(data => {
@@ -67,7 +67,7 @@ function TerminalView({ pin, activeProject }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${pin}`
+        'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({ project_name: activeProject, command })
     })
@@ -83,7 +83,7 @@ function TerminalView({ pin, activeProject }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${pin}`
+        'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({ project_name: activeProject })
     })

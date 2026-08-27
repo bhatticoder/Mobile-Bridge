@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { FolderGit2, ChevronRight, RefreshCw, Plus, Github } from 'lucide-react';
+import { FolderGit2, ChevronRight, RefreshCw, Plus, GitBranch } from 'lucide-react';
 
-function ProjectSelector({ pin, activeProject, onSelect, onNavigate }) {
+function ProjectSelector({ token, activeProject, onSelect, onNavigate }) {
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
@@ -11,7 +11,7 @@ function ProjectSelector({ pin, activeProject, onSelect, onNavigate }) {
   const fetchProjects = () => {
     setLoading(true);
     fetch('/api/projects', {
-      headers: { 'Authorization': `Bearer ${pin}` }
+      headers: { 'Authorization': `Bearer ${token}` }
     })
     .then(res => res.json())
     .then(data => {
@@ -34,7 +34,7 @@ function ProjectSelector({ pin, activeProject, onSelect, onNavigate }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${pin}`
+        'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({ name: newProjectName, repo_url: newProjectRepo })
     })
@@ -73,7 +73,7 @@ function ProjectSelector({ pin, activeProject, onSelect, onNavigate }) {
             onChange={e => setNewProjectName(e.target.value)}
           />
           <div className="relative">
-            <Github className="absolute left-3 top-2.5 text-slate-500" size={16} />
+            <GitBranch className="absolute left-3 top-2.5 text-slate-500" size={16} />
             <input 
               className="w-full bg-dark-900 border border-dark-600 rounded-lg pl-9 pr-3 py-2 mb-4 focus:border-brand-500 outline-none text-sm"
               placeholder="Git URL (optional)"

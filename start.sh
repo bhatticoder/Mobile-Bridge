@@ -1,26 +1,15 @@
 #!/bin/bash
-echo "Starting Antigravity Hub..."
+set -e
 
-# Start Backend
-echo "Starting FastAPI Backend..."
-cd backend
+echo "== Antigravity Hub (web + API + internet tunnel) =="
+
+# 1. Build the SPA so the backend can serve it (the phone's tunnel URL hits the backend directly).
+echo "[1/2] Building web frontend..."
+(cd "$(dirname "$0")/frontend" && npm run build)
+
+# 2. Start the backend which serves the app, REST API and WebSockets on :8000
+#    and auto-starts the Cloudflare quick tunnel.
+echo "[2/2] Starting backend on http://$HOSTNAME:8000 ..."
+cd "$(dirname "$0")/backend"
 source venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8000 &
-BACKEND_PID=$!
-cd ..
-
-# Start Frontend
-echo "Starting Vite Frontend..."
-cd frontend
-npm run dev -- --host 0.0.0.0 &
-FRONTEND_PID=$!
-cd ..
-
-echo "Antigravity Hub is running."
-echo "Backend PID: $BACKEND_PID"
-echo "Frontend PID: $FRONTEND_PID"
-echo "Press Ctrl+C to stop both servers."
-
-# Wait for Ctrl+C
-trap "kill $BACKEND_PID $FRONTEND_PID; exit" SIGINT SIGTERM
-wait
+exec uvicorn main:app --host 0.0.0.0 --port 8000

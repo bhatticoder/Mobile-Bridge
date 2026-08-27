@@ -67,7 +67,7 @@ def create_project(req: CreateProjectReq):
         
     try:
         if req.repo_url:
-            subprocess.run(["git", "clone", req.repo_url, req.name], cwd=str(ws_path), check=True)
+            subprocess.run(["git", "clone", "--", req.repo_url, req.name], cwd=str(ws_path), check=True)
         else:
             project_path.mkdir(parents=True, exist_ok=True)
         return {"status": "success", "message": f"Project {req.name} created"}
