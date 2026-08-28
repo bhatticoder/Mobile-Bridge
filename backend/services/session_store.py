@@ -51,22 +51,25 @@ def delete_session(session_id: str) -> None:
 
 
 def add_message(session_id: str, role: str, msg_type: str,
-                content: str = "", file_path: str = "", diff: str = "") -> dict:
+                content: str = "", file_path: str = "", diff: str = "",
+                extra: str = "") -> dict:
     now = time.time()
     cur = get_conn().execute(
-        "INSERT INTO messages (session_id, role, type, content, file_path, diff, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (session_id, role, msg_type, content, file_path, diff, now),
+        "INSERT INTO messages (session_id, role, type, content, file_path, diff, extra, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (session_id, role, msg_type, content, file_path, diff, extra, now),
     )
     get_conn().commit()
     return {"id": cur.lastrowid, "session_id": session_id, "role": role,
             "type": msg_type, "content": content, "file_path": file_path,
-            "diff": diff, "created_at": now}
+            "diff": diff, "extra": extra, "created_at": now}
 
 
 def get_messages(session_id: str, limit: int = 500) -> list:
     rows = get_conn().execute(
-        "SELECT * FROM messages WHERE session_id=? ORDER BY created_at ASC LIMIT ?",
+        "SELECT id, session_id, role, type, content, file_path, diff, "
+        "COALESCE(extra, '') AS extra, created_at "
+        "FROM messages WHERE session_id=? ORDER BY created_at ASC LIMIT ?",
         (session_id, limit),
     ).fetchall()
     return [dict(r) for r in rows]

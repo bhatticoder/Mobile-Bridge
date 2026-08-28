@@ -38,6 +38,7 @@ def _init_schema(conn: sqlite3.Connection):
             content TEXT DEFAULT '',
             file_path TEXT DEFAULT '',
             diff TEXT DEFAULT '',
+            extra TEXT DEFAULT '',
             created_at REAL,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
@@ -56,4 +57,10 @@ def _init_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_runs_session ON agent_runs(session_id, started_at);
     """)
+    # Migration: add `extra` column if missing (older DBs).
+    try:
+        conn.execute("ALTER TABLE messages ADD COLUMN extra TEXT DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()

@@ -7,6 +7,7 @@ import LivePreview from './views/LivePreview';
 import ConnectionView from './views/ConnectionView';
 
 const TOKEN_KEY = 'antigravity_token';
+const CHAT_KEY = 'antigravity_chat';
 
 function App() {
   const [activeTab, setActiveTab] = useState('projects');
@@ -16,6 +17,34 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loginError, setLoginError] = useState('');
   const [checking, setChecking] = useState(Boolean(token));
+  // Shared chat state persisted in sessionStorage so it survives tab switches.
+  const [chat, setChat] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem(CHAT_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
+
+  const updateChat = (patch) => {
+    setChat(prev => {
+      const next = { ...prev, ...patch };
+      try { sessionStorage.setItem(CHAT_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  // Store active project across reloads
+  useEffect(() => {
+    const saved = sessionStorage.getItem('antigravity_project');
+    if (saved) setActiveProject(saved);
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (activeProject) sessionStorage.setItem('antigravity_project', activeProject);
+      else sessionStorage.removeItem('antigravity_project');
+    } catch {}
+  }, [activeProject]);
 
   useEffect(() => {
     if (!token) {
@@ -66,9 +95,11 @@ function App() {
       body: JSON.stringify({ token })
     }).catch(() => {});
     localStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(CHAT_KEY);
     setToken('');
     setActiveProject(null);
     setActiveTab('projects');
+    setChat({});
   };
 
   if (!isAuthenticated) {
@@ -105,23 +136,9 @@ function App() {
     );
   }
 
-  const renderContent = () => {
-    switch (activeTab) {
-      case 'projects':
-        return <ProjectSelector token={token} activeProject={activeProject} onSelect={setActiveProject} onNavigate={() => setActiveTab('console')} />;
-      case 'console':
-        return <PromptConsole token={token} activeProject={activeProject} />;
-      case 'terminal':
-        return <TerminalView token={token} activeProject={activeProject} />;
-      case 'preview':
-        return <LivePreview token={token} activeProject={activeProject} />;
-      case 'connect':
-        return <ConnectionView token={token} onLogout={handleLogout} />;
-      default:
-        return null;
-    }
-  };
-
+  // Keep all view components mounted and toggle visibility so state (chat,
+  // session id, WS connection) survives switching tabs. This fixes the
+  // "session disappears / history resets" bug.
   return (
     <div className="h-[100dvh] flex flex-col bg-dark-900 overflow-hidden">
       <header className="h-14 shrink-0 bg-dark-800 border-b border-dark-700 flex items-center px-4 justify-between">
@@ -139,7 +156,23 @@ function App() {
       </header>
 
       <main className="flex-1 overflow-hidden relative">
-        {renderContent()}
+        <div className={`h-full ${activeTab === 'projects' ? '' : 'hidden'}`}>
+          <ProjectSelector token={token} activeProject={activeProject} onSelect={(p) => { setActiveProject(p); setActiveTab('console'); }} />
+        </div>
+        <div className={`h-full ${activeTab === 'console' ? '' : 'hidden'}`}>
+          {activeProject && (
+            <PromptConsole token={token} activeProject={activeProject} chat={chat} setChat={updateChat} />
+          )}
+        </div>
+        <div className={`h-full ${activeTab === 'terminal' ? '' : 'hidden'}`}>
+          {activeProject && <TerminalView token={token} activeProject={activeProject} />}
+        </div>
+        <div className={`h-full ${activeTab === 'preview' ? '' : 'hidden'}`}>
+          {activeProject && <LivePreview token={token} activeProject={activeProject} />}
+        </div>
+        <div className={`h-full ${activeTab === 'connect' ? '' : 'hidden'}`}>
+          <ConnectionView token={token} onLogout={handleLogout} />
+        </div>
       </main>
 
       <nav className="h-16 shrink-0 bg-dark-800 border-t border-dark-700 flex items-center justify-around px-2 pb-safe">

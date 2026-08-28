@@ -1,11 +1,13 @@
 import asyncio
+import base64
 import json
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from auth import validate_token
-from config import get_workspace_path
+from config import get_workspace_path, settings
 from services.agent_runner import AgentRunner, list_agents, list_opencode_models
 from services import session_store
 
@@ -50,6 +52,31 @@ def _persist_event(session_id: str, data: dict):
         session_store.add_message(
             session_id, "system", "error", content=data.get("content", ""),
         )
+
+
+def _save_attachment(session_id: str, filename: str, data_b64: str, mime: str) -> dict:
+    """Persist an uploaded file/image to disk and return its metadata."""
+    data_dir = Path(settings.DATA_DIR or (Path(__file__).resolve().parent.parent / "data"))
+    att_dir = data_dir / "attachments" / session_id
+    att_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(filename).name or "file"
+    target = att_dir / safe_name
+    try:
+        raw = base64.b64decode(data_b64)
+        target.write_bytes(raw)
+    except Exception as exc:
+        logger.warning("Failed to save attachment %s: %s", filename, exc)
+        return {"ok": False, "error": str(exc)}
+    is_image = mime.startswith("image/")
+    return {
+        "ok": True,
+        "name": safe_name,
+        "path": str(target),
+        "mime": mime,
+        "is_image": is_image,
+        "url": f"/attachments/{session_id}/{safe_name}",
+        "size": len(raw),
+    }
 
 
 @router.get("/agents")
@@ -117,6 +144,7 @@ async def websocket_prompt(
         str(project_path), engine=engine, agent=agent, model=model
     )
     run_id = None
+    pending_attachments: list[dict] = []
 
     try:
         while True:
@@ -124,16 +152,48 @@ async def websocket_prompt(
             message = json.loads(data)
             mtype = message.get("type", "")
 
-            if mtype == "prompt":
+            if mtype == "attachment":
+                # {type:'attachment', name, mime, data(base64)}
+                saved = _save_attachment(
+                    session_id, message.get("name", "file"),
+                    message.get("data", ""), message.get("mime", ""),
+                )
+                if not saved.get("ok"):
+                    await pws.send_json({"type": "error", "content": "Failed to save attachment: " + saved.get("error", "unknown")})
+                    continue
+                # Record as a user message with type attachment
+                extra = json.dumps({"name": saved["name"], "url": saved["url"], "mime": saved["mime"], "is_image": saved["is_image"]})
+                session_store.add_message(
+                    session_id, "user", "attachment",
+                    content=f"📎 {saved['name']}", extra=extra,
+                )
+                # Keep it pending to attach to the next prompt
+                pending_attachments.append({
+                    "path": saved["path"], "name": saved["name"],
+                    "mime": saved["mime"], "is_image": saved["is_image"],
+                })
+                await pws.send_json({"type": "attachment_ok", "name": saved["name"], "url": saved["url"], "is_image": saved["is_image"]})
+                continue
+
+            elif mtype == "prompt":
                 if agent_runner.task is not None and not agent_runner.task.done():
                     await pws.send_json({"type": "error", "content": "Agent is already running. Send cancel to abort it."})
                     continue
                 prompt = message.get("content", "").strip()
-                if not prompt:
+                if not prompt and not pending_attachments:
                     continue
 
                 # Persist user message
                 session_store.add_message(session_id, "user", "text", content=prompt)
+
+                # Attach pending files/images into the prompt context
+                if pending_attachments:
+                    attach_text = "\n\nAttached files:\n" + "\n".join(
+                        f"- {a['name']} ({a['mime']}) at {a['path']}"
+                        for a in pending_attachments
+                    )
+                    prompt = (prompt + attach_text).strip()
+                    pending_attachments = []
 
                 # Current engine/agent may be sent per-prompt
                 cur_engine = message.get("engine", engine)

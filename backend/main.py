@@ -11,7 +11,7 @@ import logging
 
 from config import settings
 from auth import require_auth
-from routes import projects, dev, ws, auth, tunnel, sessions, files
+from routes import projects, dev, ws, auth, tunnel, sessions, files, attachments
 from services.tunnel_manager import tunnel_manager
 
 logging.basicConfig(level=logging.INFO)
@@ -85,6 +85,7 @@ app.include_router(dev.router, prefix="/api/dev", tags=["Development"], dependen
 app.include_router(tunnel.router, tags=["Tunnel"], dependencies=protected)
 app.include_router(sessions.router, prefix="/api/sessions", tags=["Sessions"], dependencies=protected)
 app.include_router(files.router, prefix="/api/projects", tags=["Files"], dependencies=protected)
+app.include_router(attachments.router, prefix="/attachments", tags=["Attachments"])  # no auth (img tags)
 app.include_router(ws.router, prefix="/ws")  # WS auth handled in route
 
 
