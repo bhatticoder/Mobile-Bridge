@@ -1,4 +1,4 @@
-# Python
+# ── Python ────────────────────────────────────────────────
 __pycache__/
 *.pyc
 backend/venv/
@@ -8,15 +8,35 @@ backend/dist/
 backend/*.spec
 backend/bin/cloudflared
 
-# Frontend
+# Runtime data / persistence DB
+backend/data/
+
+# ── Frontend ─────────────────────────────────────────────
 frontend/node_modules/
 frontend/dist/
 frontend/release/
 frontend/android/.gradle/
+frontend/android/react-native-keystore.jks
+frontend/android/app/build/
 
-# Logs
+# ── Secrets & environment ────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.jks
+credentials.json
+
+# ── Logs & temp ──────────────────────────────────────────
 *.log
+logs/
+tmp/
+*.tmp
+*.swp
 
-# OS
+# ── OS / editors ─────────────────────────────────────────
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/

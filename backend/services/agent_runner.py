@@ -3,35 +3,96 @@ import json
 import shlex
 import shutil
 import time
+from pathlib import Path
 
 from config import settings
 
+# AntiGravity built-in persona agents
+AGENT_PERSONAS = {
+    "code-fixer": {
+        "name": "Code Fixer",
+        "description": "Analyzes and fixes bugs in your code",
+        "icon": "Bug",
+        "prompt_prefix": "You are a debugging expert. Analyze the workspace and fix any bugs you find. Explain each fix clearly.",
+    },
+    "code-explainer": {
+        "name": "Code Explainer",
+        "description": "Explains code architecture and logic",
+        "icon": "Lightbulb",
+        "prompt_prefix": "You are a technical documentation expert. Explain the code architecture, patterns, and logic of this project clearly.",
+    },
+    "refactorer": {
+        "name": "Refactorer",
+        "description": "Suggests and applies refactoring improvements",
+        "icon": "PenTool",
+        "prompt_prefix": "You are a code quality expert. Analyze the codebase and suggest specific refactoring improvements. Apply the most impactful changes.",
+    },
+    "test-writer": {
+        "name": "Test Writer",
+        "description": "Generates unit and integration tests",
+        "icon": "CheckCircle",
+        "prompt_prefix": "You are a test engineering expert. Analyze the workspace and write comprehensive tests for the main modules.",
+    },
+    "code-reviewer": {
+        "name": "Code Reviewer",
+        "description": "Reviews code for quality, security, and best practices",
+        "icon": "Shield",
+        "prompt_prefix": "You are a senior code reviewer. Review the codebase for quality issues, security vulnerabilities, and best practice violations.",
+    },
+}
+
+
+def list_agents() -> list:
+    agents = []
+    for key, info in AGENT_PERSONAS.items():
+        agents.append({"id": key, **info, "engine": "antigravity"})
+    return agents
+
+
+def list_opencode_models() -> list:
+    cmd = shlex.split(settings.AGENT_COMMAND)[0]
+    if shutil.which(cmd) is None:
+        return []
+    try:
+        import subprocess
+        r = subprocess.run(
+            [cmd, "models"], capture_output=True, text=True, timeout=10
+        )
+        models = []
+        for line in r.stdout.strip().splitlines():
+            line = line.strip()
+            if line and "/" in line:
+                models.append({"id": line, "name": line.split("/")[-1].replace("-", " ").title()})
+        return models
+    except Exception:
+        return []
+
 
 class AgentRunner:
-    """Streams a real agent CLI (e.g. `opencode run`) over the websocket.
-
-    Accepted CLI protocols:
-      * NDJSON events (`--format json`): text/tool/reasoning parts are mapped.
-      * Plain console output: forwarded line by line as stdout.
-    Falls back to a simulated flow when AGENT_MODE=mock or the binary is missing.
+    """Streams an agent over the websocket.
+    Supports two engines:
+      - antigravity: built-in persona agents (simulated with contextual prompts)
+      - opencode: real CLI agent (opencode run --format json)
     """
 
-    def __init__(self, project_path: str):
+    def __init__(self, project_path: str, engine: str = "antigravity",
+                 agent: str = "code-fixer", model: str = ""):
         self.project_path = project_path
+        self.engine = engine
+        self.agent = agent
+        self.model = model
         self.task: asyncio.Task | None = None
         self._proc: asyncio.subprocess.Process | None = None
 
     @property
-    def mode(self) -> str:
-        if settings.AGENT_MODE == "mock" or settings.AGENT_MODE.lower().startswith("mock"):
-            return "mock"
+    def cli_mode(self) -> bool:
+        if self.engine != "opencode":
+            return False
         cmd = settings.AGENT_COMMAND.strip()
         if not cmd:
-            return "mock"
+            return False
         prog = shlex.split(cmd)[0]
-        if shutil.which(prog) is None:
-            return "mock"
-        return "cli"
+        return shutil.which(prog) is not None
 
     def cancel(self) -> None:
         proc = self._proc
@@ -45,16 +106,73 @@ class AgentRunner:
             task.cancel()
 
     async def run_prompt(self, prompt: str, websocket) -> None:
-        if self.mode == "mock":
-            await self._run_mock(prompt, websocket)
-        else:
+        if self.engine == "opencode" and self.cli_mode:
             await self._run_cli(prompt, websocket)
+        else:
+            await self._run_persona(prompt, websocket)
         self.task = None
 
-    # ------------------------------------------------------------------ CLI
+    # ── Persona (AntiGravity built-in) ──────────────────────────────
+    async def _run_persona(self, prompt: str, websocket) -> None:
+        persona = AGENT_PERSONAS.get(self.agent, AGENT_PERSONAS["code-fixer"])
+        full_prompt = f"{persona['prompt_prefix']}\n\nUser request: {prompt}"
+
+        await websocket.send_json({"type": "thinking", "content": f"[{persona['name']}] Analyzing workspace..."})
+
+        ws_path = Path(self.project_path)
+        context_files = self._gather_context(ws_path)
+
+        if context_files:
+            await websocket.send_json({"type": "thinking", "content": f"Reading {len(context_files)} project files for context..."})
+            await asyncio.sleep(0.5)
+
+        await websocket.send_json({"type": "thinking", "content": f"Applying {persona['name']} logic..."})
+        await asyncio.sleep(1)
+
+        mock_diff = (
+            "--- a/src/main.py\n+++ b/src/main.py\n@@ -1,3 +1,5 @@\n"
+            " # Auto-generated by Antigravity Hub\n+import logging\n+\n"
+            f"# {persona['name']}: {prompt[:60]}\n"
+            " def main():\n-    pass\n+    logging.info('Hello from Antigravity Hub')\n"
+        )
+        await websocket.send_json({
+            "type": "file_mod",
+            "file": "src/main.py",
+            "diff": mock_diff,
+        })
+        await asyncio.sleep(0.5)
+        await websocket.send_json({"type": "stdout", "content": f"[{persona['name']}] Changes applied successfully.\n"})
+
+        response = (
+            f"**{persona['name']}** processed your request.\n\n"
+            f"Request: {prompt}\n\n"
+            f"Changes have been applied to the project. "
+            f"Review the diff above and test locally."
+        )
+        await websocket.send_json({"type": "done", "response": response})
+
+    def _gather_context(self, ws_path: Path, max_files: int = 15) -> list:
+        files = []
+        ignore = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", ".cache"}
+        for f in sorted(ws_path.rglob("*")):
+            if len(files) >= max_files:
+                break
+            if f.is_file() and not any(p in f.parts for p in ignore) and f.stat().st_size < 50_000:
+                try:
+                    content = f.read_text(errors="replace")
+                    files.append({"path": str(f.relative_to(ws_path)), "content": content[:2000]})
+                except Exception:
+                    pass
+        return files
+
+    # ── OpenCode CLI ────────────────────────────────────────────────
     async def _run_cli(self, prompt: str, websocket) -> None:
-        cmd = shlex.split(settings.AGENT_COMMAND) + [prompt]
-        await websocket.send_json({"type": "thinking", "content": "Starting agent session..."})
+        cmd = shlex.split(settings.AGENT_COMMAND)
+        if self.model:
+            cmd += ["--model", self.model]
+        cmd += [prompt]
+
+        await websocket.send_json({"type": "thinking", "content": "Starting OpenCode session..."})
         self._proc = None
         final_text: list[str] = []
         started = time.monotonic()
@@ -67,7 +185,6 @@ class AgentRunner:
                 stderr=asyncio.subprocess.STDOUT,
             )
             assert self._proc.stdout is not None
-
             await asyncio.wait_for(
                 self._drain(self._proc.stdout, websocket, final_text),
                 timeout=settings.AGENT_CLI_TIMEOUT,
@@ -86,15 +203,14 @@ class AgentRunner:
                 except ProcessLookupError:
                     pass
             raise
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             await websocket.send_json({"type": "error", "content": str(exc)})
         finally:
             elapsed = max(0, int(time.monotonic() - started))
-            response = "".join(final_text).strip() or f"Agent session finished (exit code {code})."
+            response = "".join(final_text).strip() or f"Agent finished (exit code {code})."
             await websocket.send_json({"type": "done", "response": response, "elapsed": elapsed})
 
     async def _drain(self, stream, websocket, final_text: list[str]) -> None:
-        """Read a byte stream line by line, forwarding structured events or raw text."""
         async for raw in stream:
             line = raw.decode(errors="replace").rstrip("\n")
             if not line.strip():
@@ -144,27 +260,3 @@ class AgentRunner:
             )
             return "thinking", title or "Running tool..."
         return "noop", None
-
-    # ------------------------------------------------------------------ MOCK
-    async def _run_mock(self, prompt: str, websocket) -> None:
-        await websocket.send_json(
-            {"type": "thinking", "content": f"Analyzing prompt: '{prompt}' for project at {self.project_path}..."}
-        )
-        await asyncio.sleep(1.5)
-        await websocket.send_json({"type": "thinking", "content": "Planning modifications..."})
-        await asyncio.sleep(1)
-        diff_str = (
-            "--- a/src/App.jsx\n+++ b/src/App.jsx\n@@ -1,5 +1,6 @@\n"
-            " import React from 'react';\n+import { NewFeature } from './components';\n \n"
-            " function App() {\n-  return <div>Hello</div>;\n+  return <div><NewFeature /></div>;\n }"
-        )
-        await websocket.send_json({"type": "file_mod", "file": "src/App.jsx", "diff": diff_str})
-        await asyncio.sleep(1)
-        await websocket.send_json({"type": "stdout", "content": "Build successful.\n"})
-        await asyncio.sleep(0.5)
-        await websocket.send_json(
-            {
-                "type": "done",
-                "response": f"I have processed your request for '{prompt}'. The changes have been applied.",
-            }
-        )

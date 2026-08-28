@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Auth session lifetime.
     SESSION_TTL_HOURS: int = 24
 
+    # Persistence.
+    DATA_DIR: str = ""
+
 
 settings = Settings()
 
