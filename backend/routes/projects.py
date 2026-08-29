@@ -25,17 +25,24 @@ def get_git_info(path: str):
     status = None
     if os.path.exists(os.path.join(path, ".git")):
         try:
-            branch_cmd = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path, capture_output=True, text=True, check=True)
+            branch_cmd = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path, capture_output=True, text=True, check=True, timeout=5)
             branch = branch_cmd.stdout.strip()
             
-            status_cmd = subprocess.run(["git", "status", "-s"], cwd=path, capture_output=True, text=True, check=True)
+            status_cmd = subprocess.run(["git", "status", "-s"], cwd=path, capture_output=True, text=True, check=True, timeout=5)
             status = "Clean" if not status_cmd.stdout.strip() else "Dirty"
         except Exception:
             pass
     return branch, status
 
+_projects_cache: dict = {"ts": 0.0, "data": []}
+_PROJECTS_TTL = 15.0  # seconds
+
 @router.get("", response_model=List[ProjectInfo])
 def list_projects():
+    # Cached: scanning 17+ repos with git subprocesses takes seconds per hit.
+    if time.time() - _projects_cache["ts"] < _PROJECTS_TTL:
+        return _projects_cache["data"]
+
     ws_path = get_workspace_path()
     
     if not ws_path.exists():
@@ -55,6 +62,8 @@ def list_projects():
             
     # Sort by last modified descending
     projects.sort(key=lambda x: x.last_modified, reverse=True)
+    _projects_cache["ts"] = time.time()
+    _projects_cache["data"] = projects
     return projects
 
 @router.post("/create")

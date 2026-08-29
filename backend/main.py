@@ -56,8 +56,30 @@ async def lifespan(app: FastAPI):
         logger.info("Tunnel auto-start: %s", info.get("status"))
     elif settings.TUNNEL_ENABLED:
         logger.warning("cloudflared not installed; skipping tunnel auto-start")
+    # Pre-warm slow caches (git scan + opencode models) so the first request
+    # from a phone/tunnel is instant instead of blocking for seconds.
+    _prewarm()
     yield
     tunnel_manager.stop()
+
+
+def _prewarm():
+    import threading
+    import time
+
+    def warm():
+        started = time.time()
+        try:
+            from routes import projects
+            from services.agent_runner import list_opencode_models, list_agents
+            projects.list_projects()
+            list_opencode_models(force=True)
+            list_agents()
+            logger.info("Cache prewarmed in %.1fs", time.time() - started)
+        except Exception as exc:
+            logger.warning("prewarm failed: %s", exc)
+
+    threading.Thread(target=warm, daemon=True).start()
 
 
 app = FastAPI(

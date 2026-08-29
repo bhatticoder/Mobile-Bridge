@@ -49,7 +49,17 @@ def list_agents() -> list:
     return agents
 
 
-def list_opencode_models() -> list:
+_models_cache: dict = {"ts": 0.0, "data": []}
+_MODELS_TTL = 300.0  # seconds
+
+
+def list_opencode_models(force: bool = False) -> list:
+    """Models from the local opencode install. Cached 5 min because spawning
+    `opencode models` (which reads a large sqlite db) costs ~4s every call."""
+    import time as _t
+    now = _t.time()
+    if not force and (now - _models_cache["ts"]) < _MODELS_TTL:
+        return _models_cache["data"]
     cmd = shlex.split(settings.AGENT_COMMAND)[0]
     if shutil.which(cmd) is None:
         return []
@@ -63,6 +73,8 @@ def list_opencode_models() -> list:
             line = line.strip()
             if line and "/" in line:
                 models.append({"id": line, "name": line.split("/")[-1].replace("-", " ").title()})
+        _models_cache["ts"] = now
+        _models_cache["data"] = models
         return models
     except Exception:
         return []
