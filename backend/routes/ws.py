@@ -2,56 +2,18 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from auth import validate_token
 from config import get_workspace_path, settings
-from services.agent_runner import AgentRunner, list_agents, list_opencode_models
-from services import session_store
+from services.agent_runner import list_agents, list_opencode_models
+from services import run_manager, session_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Wrap the raw websocket so every event we send is also persisted to the session.
-class PersistingSocket:
-    def __init__(self, websocket, session_id: str):
-        self._ws = websocket
-        self._session_id = session_id
-
-    async def send_json(self, data: dict):
-        await self._ws.send_json(data)
-        try:
-            _persist_event(self._session_id, data)
-        except Exception:
-            pass
-
-    @property
-    def client_state(self):
-        return self._ws.client_state
-
-
-def _persist_event(session_id: str, data: dict):
-    etype = data.get("type", "")
-    if etype in ("thinking", "stdout", "stderr", "text"):
-        session_store.add_message(
-            session_id, "agent", etype if etype == "thinking" else "terminal",
-            content=data.get("content", ""),
-        )
-    elif etype == "file_mod":
-        session_store.add_message(
-            session_id, "agent", "diff",
-            file_path=data.get("file", ""), diff=data.get("diff", ""),
-        )
-    elif etype == "done":
-        session_store.add_message(
-            session_id, "agent", "text", content=data.get("response", ""),
-        )
-    elif etype == "error":
-        session_store.add_message(
-            session_id, "system", "error", content=data.get("content", ""),
-        )
 
 
 def _save_attachment(session_id: str, filename: str, data_b64: str, mime: str) -> dict:
@@ -116,6 +78,7 @@ async def websocket_prompt(
         return
 
     # Create or resume session
+    is_new_session = not session_id
     if session_id:
         session = session_store.get_session(session_id)
         if not session:
@@ -127,24 +90,52 @@ async def websocket_prompt(
             engine = session.get("engine", engine)
             agent = session.get("agent", agent)
             model = session.get("model", model)
-            session_store.update_session(session_id, updated_at=__import__("time").time())
     else:
         session = session_store.create_session(
             project=project, engine=engine, agent=agent, model=model
         )
         session_id = session["id"]
 
-    # Replay history on reconnect
-    history = session_store.get_messages(session_id, limit=200)
-    pws = PersistingSocket(websocket, session_id)
-    if history:
-        await pws.send_json({"type": "history", "session_id": session_id, "messages": history})
+    # Get or keep-alive the daemon-side run for this session.
+    run = run_manager.get_run(session_id)
+    if run is None or run.project_path != str(project_path):
+        run = run_manager.create_run(
+            session_id, str(project_path),
+            engine=engine, agent=agent, model=model,
+            oc_session_id=session.get("oc_session_id", ""),
+        )
+    else:
+        run.runner.engine = engine
+        run.runner.agent = agent
+        run.runner.model = model
+        run.runner.oc_session_id = session.get("oc_session_id", "")
 
-    agent_runner = AgentRunner(
-        str(project_path), engine=engine, agent=agent, model=model
-    )
-    run_id = None
-    pending_attachments: list[dict] = []
+    run.subscribe(websocket)
+
+    # Replay history on reconnect so refresh keeps everything.
+    history = session_store.get_messages(session_id, limit=200)
+    if history:
+        await websocket.send_json({"type": "history", "session_id": session_id, "messages": history})
+    else:
+        await websocket.send_json({"type": "session", "session_id": session_id})
+
+    # Tell the client the current run state. If a run is active the client
+    # should keep receiving live events; if one finished while disconnected,
+    # tell it the outcome so it can stop spinners.
+    if run.is_running():
+        await websocket.send_json({
+            "type": "running", "run_id": run.run_id,
+            "session_id": session_id,
+        })
+    else:
+        last_run = session_store.get_last_run(session_id)
+        if last_run and last_run["status"] in ("completed", "cancelled", "failed"):
+            await websocket.send_json({
+                "type": "run_status", "status": last_run["status"],
+                "session_id": session_id,
+            })
+
+    periodic = asyncio.create_task(_heartbeat(websocket))
 
     try:
         while True:
@@ -153,107 +144,101 @@ async def websocket_prompt(
             mtype = message.get("type", "")
 
             if mtype == "attachment":
-                # {type:'attachment', name, mime, data(base64)}
                 saved = _save_attachment(
                     session_id, message.get("name", "file"),
                     message.get("data", ""), message.get("mime", ""),
                 )
                 if not saved.get("ok"):
-                    await pws.send_json({"type": "error", "content": "Failed to save attachment: " + saved.get("error", "unknown")})
+                    await websocket.send_json({"type": "error", "content": "Failed to save attachment: " + saved.get("error", "unknown")})
                     continue
-                # Record as a user message with type attachment
                 extra = json.dumps({"name": saved["name"], "url": saved["url"], "mime": saved["mime"], "is_image": saved["is_image"]})
                 session_store.add_message(
                     session_id, "user", "attachment",
                     content=f"📎 {saved['name']}", extra=extra,
                 )
-                # Keep it pending to attach to the next prompt
-                pending_attachments.append({
+                run.pending_attachments.append({
                     "path": saved["path"], "name": saved["name"],
                     "mime": saved["mime"], "is_image": saved["is_image"],
                 })
-                await pws.send_json({"type": "attachment_ok", "name": saved["name"], "url": saved["url"], "is_image": saved["is_image"]})
+                await websocket.send_json({"type": "attachment_ok", "name": saved["name"], "url": saved["url"], "is_image": saved["is_image"]})
                 continue
 
             elif mtype == "prompt":
-                if agent_runner.task is not None and not agent_runner.task.done():
-                    await pws.send_json({"type": "error", "content": "Agent is already running. Send cancel to abort it."})
+                if run.is_running():
+                    await websocket.send_json({"type": "error", "content": "Agent is already running."})
                     continue
                 prompt = message.get("content", "").strip()
-                if not prompt and not pending_attachments:
+                if not prompt and not run.pending_attachments:
                     continue
 
-                # Persist user message
+                # Persist user message + auto-title conversation
                 session_store.add_message(session_id, "user", "text", content=prompt)
+                session_store.ensure_title(session_id, prompt)
+                session_store.update_session(session_id, updated_at=time.time())
 
                 # Attach pending files/images into the prompt context
-                if pending_attachments:
+                if run.pending_attachments:
                     attach_text = "\n\nAttached files:\n" + "\n".join(
                         f"- {a['name']} ({a['mime']}) at {a['path']}"
-                        for a in pending_attachments
+                        for a in run.pending_attachments
                     )
                     prompt = (prompt + attach_text).strip()
-                    pending_attachments = []
+                    run.pending_attachments = []
 
                 # Current engine/agent may be sent per-prompt
                 cur_engine = message.get("engine", engine)
                 cur_agent = message.get("agent", agent)
                 cur_model = message.get("model", model)
 
-                run_id = session_store.start_agent_run(
-                    session_id, prompt, cur_engine, cur_agent, cur_model
-                )
+                # Multi-turn context from prior messages
+                history_ctx = session_store.get_conversation_context(session_id, max_msgs=8)
+
                 session_store.update_session(
-                    session_id, engine=cur_engine, agent=cur_agent, model=cur_model
+                    session_id, engine=cur_engine, agent=cur_agent, model=cur_model,
+                    updated_at=time.time(),
                 )
+                oc_session_id = session_store.get_session(session_id).get("oc_session_id", "")
 
-                agent_runner.engine = cur_engine
-                agent_runner.agent = cur_agent
-                agent_runner.model = cur_model
-
-                agent_runner.task = asyncio.create_task(
-                    _run_guarded(agent_runner, prompt, pws, run_id)
+                run = run_manager.start_run(
+                    session_id, str(project_path), prompt,
+                    cur_engine, cur_agent, cur_model,
+                    oc_session_id=oc_session_id, history_ctx=history_ctx,
                 )
+                run.subscribe(websocket)
 
             elif mtype == "cancel":
-                agent_runner.cancel()
-                if run_id:
-                    session_store.finish_agent_run(run_id, "cancelled")
-                await pws.send_json({"type": "thinking", "content": "Cancelling agent..."})
+                run.cancel()
+                await websocket.send_json({"type": "thinking", "content": "Cancelling agent..."})
 
             elif mtype == "set_engine":
                 engine = message.get("engine", engine)
                 agent = message.get("agent", agent)
                 model = message.get("model", model)
-                agent_runner.engine = engine
-                agent_runner.agent = agent
-                agent_runner.model = model
+                run.runner.engine = engine
+                run.runner.agent = agent
+                run.runner.model = model
 
     except WebSocketDisconnect:
-        agent_runner.cancel()
-        if run_id:
-            session_store.finish_agent_run(run_id, "cancelled")
-        logger.info("Client disconnected from project %s", project)
+        # IMPORTANT: do NOT cancel the run. It keeps running daemon-side and
+        # events stay persisted; the client can reconnect any time.
+        pass
     except Exception as exc:
-        agent_runner.cancel()
-        if run_id:
-            session_store.finish_agent_run(run_id, "failed")
         logger.warning("WS error for project %s: %s", project, exc)
         try:
-            await pws.send_json({"type": "error", "content": str(exc)})
-            await websocket.close(code=1011)
+            await websocket.send_json({"type": "error", "content": str(exc)})
         except Exception:
             pass
+    finally:
+        periodic.cancel()
+        run.unsubscribe(websocket)
+        logger.info("WS closed for project %s session %s", project, session_id)
 
 
-async def _run_guarded(runner: AgentRunner, prompt: str, pws, run_id: str):
-    """Run the agent and update the agent_runs row on completion."""
+async def _heartbeat(websocket: WebSocket):
+    """Keep NAT/firewall paths alive across long-running agent turns."""
     try:
-        await runner.run_prompt(prompt, pws)
-        session_store.finish_agent_run(run_id, "completed")
-    except asyncio.CancelledError:
-        session_store.finish_agent_run(run_id, "cancelled")
-        raise
+        while True:
+            await asyncio.sleep(20)
+            await websocket.send_json({"type": "ping"})
     except Exception:
-        session_store.finish_agent_run(run_id, "failed")
-        raise
+        pass

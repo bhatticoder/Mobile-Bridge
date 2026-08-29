@@ -63,4 +63,10 @@ def _init_schema(conn: sqlite3.Connection):
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Migration: map each hub session to a real opencode session (context sync).
+    try:
+        conn.execute("ALTER TABLE sessions ADD COLUMN oc_session_id TEXT DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()

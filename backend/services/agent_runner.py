@@ -76,13 +76,20 @@ class AgentRunner:
     """
 
     def __init__(self, project_path: str, engine: str = "antigravity",
-                 agent: str = "code-fixer", model: str = ""):
+                 agent: str = "code-fixer", model: str = "",
+                 oc_session_id: str = "", history_ctx: str = ""):
         self.project_path = project_path
         self.engine = engine
         self.agent = agent
         self.model = model
         self.task: asyncio.Task | None = None
         self._proc: asyncio.subprocess.Process | None = None
+        # Real opencode session this conversation maps to (context on the system).
+        self.oc_session_id = oc_session_id
+        # Captured after a CLI run so the next turn can continue the same session.
+        self.last_session_id = ""
+        # Prior conversation text for the Antigravity persona (multi-turn).
+        self.history_ctx = history_ctx
 
     @property
     def cli_mode(self) -> bool:
@@ -116,6 +123,8 @@ class AgentRunner:
     async def _run_persona(self, prompt: str, websocket) -> None:
         persona = AGENT_PERSONAS.get(self.agent, AGENT_PERSONAS["code-fixer"])
         full_prompt = f"{persona['prompt_prefix']}\n\nUser request: {prompt}"
+        if self.history_ctx:
+            full_prompt += f"\n\nPrevious conversation:\n{self.history_ctx}"
 
         await websocket.send_json({"type": "thinking", "content": f"[{persona['name']}] Analyzing workspace..."})
 
@@ -170,6 +179,13 @@ class AgentRunner:
         cmd = shlex.split(settings.AGENT_COMMAND)
         if self.model:
             cmd += ["--model", self.model]
+        if self.oc_session_id:
+            # Continue the same opencode session so context stays in the
+            # system's opencode database across turns.
+            cmd += ["--session", self.oc_session_id]
+        else:
+            clean_title = (prompt or "").strip().replace("\n", " ")[:60]
+            cmd += ["--title", clean_title or "New chat"]
         cmd += [prompt]
 
         await websocket.send_json({"type": "thinking", "content": "Starting OpenCode session..."})
@@ -223,6 +239,9 @@ class AgentRunner:
             if event is None:
                 await websocket.send_json({"type": "stdout", "content": line + "\n"})
                 continue
+            sid = event.get("sessionID") or event.get("session_id")
+            if sid:
+                self.last_session_id = sid
             kind, payload = self._classify(event)
             if kind == "text":
                 if payload:

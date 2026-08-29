@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, FolderOpen, History, X, Cpu, Paperclip, FileText, File as FileIcon, XCircle } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Send, Loader2, FolderOpen, X, Cpu, Paperclip, FileText, File as FileIcon, XCircle, Plus, Trash2, SquarePen, Bot, Boxes, RotateCcw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { EngineSelector, FileExplorer, UsageMeter } from '../components/EnginePanel';
 
@@ -8,21 +8,37 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [wsError, setWsError] = useState('');
   const [showExplorer, setShowExplorer] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
-  const [sessions, setSessions] = useState([]);
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [conversations, setConversations] = useState([]);
   const [attachments, setAttachments] = useState([]);
   const wsRef = useRef(null);
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
-  const pendingAttachments = useRef([]);
+  const reconnectTimer = useRef(null);
+  const reconnectAttempts = useRef(0);
+  const isIntentionalClose = useRef(false);
+  const appHot = useRef(null);
+  const currentParams = useRef({ sid: '', e: 'antigravity', a: 'code-fixer', m: '' });
 
-  // Derived from lifted chat state (persists across tab switches & reloads)
   const sessionId = chat.sessionId || '';
   const engine = chat.engine || 'antigravity';
   const agent = chat.agent || 'code-fixer';
   const model = chat.model || '';
   const messages = chat.messages || [];
   const selectedFile = chat.selectedFile || '';
+
+  const refreshConversations = useCallback(() => {
+    fetch(`/api/sessions/conversations?project=${encodeURIComponent(activeProject)}&limit=50`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then(setConversations)
+      .catch(() => {});
+  }, [activeProject, token]);
+
+  const appendMsg = useCallback((msg) => {
+    setChat(prev => ({ ...prev, project: activeProject, messages: [...(prev.messages || []), msg] }));
+  }, [activeProject, setChat]);
 
   const buildWsUrl = (sid, e, a, m) => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -33,20 +49,25 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
       `&engine=${encodeURIComponent(e)}&agent=${encodeURIComponent(a)}&model=${encodeURIComponent(m)}`;
   };
 
-  const connectWs = (sid, e, a, m) => {
-    if (wsRef.current && wsRef.current.readyState <= WebSocket.OPEN) {
-      wsRef.current.close();
+  const connectWsRef = useRef(() => {});
+
+  const connectWs = useCallback((sid, e, a, m) => {
+    if (wsRef.current) {
+      isIntentionalClose.current = true;
+      try { wsRef.current.close(); } catch {}
     }
+    currentParams.current = { sid, e, a, m };
     setWsError('');
-    setChat({ project: activeProject, sessionId: sid || '', messages: [], engine: e, agent: a, model: m });
+    setChat({ project: activeProject, sessionId: sid || '', messages: [], engine: e, agent: a, model: m, selectedFile: '' });
 
     const wsUrl = buildWsUrl(sid, e, a, m);
     const ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => setWsError('');
+    ws.onopen = () => { setWsError(''); reconnectAttempts.current = 0; };
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
+      if (data.type === 'ping') return;
 
       if (data.type === 'history') {
         const msgs = (data.messages || []).map(m => ({
@@ -54,11 +75,17 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
           file: m.file_path, diff: m.diff,
           extra: m.extra ? (typeof m.extra === 'string' ? safeParse(m.extra) : m.extra) : null,
         }));
-        setChat({ project: activeProject, sessionId: data.session_id, messages: msgs, engine: e, agent: a, model: m });
-      } else if (data.session_id) {
+        setChat({ project: activeProject, sessionId: data.session_id, messages: msgs, engine: e, agent: a, model: m, selectedFile: '' });
+        setIsProcessing(false);
+        refreshConversations();
+      } else if (data.type === 'session') {
         setChat(prev => ({ ...prev, sessionId: data.session_id }));
+        refreshConversations();
+      } else if (data.type === 'running') {
+        setIsProcessing(true);
+      } else if (data.type === 'run_status') {
+        setIsProcessing(false);
       } else if (data.type === 'error') {
-        if (/token/i.test(data.content)) setWsError(data.content);
         appendMsg({ role: 'system', content: `Error: ${data.content}`, type: 'error' });
         setIsProcessing(false);
       } else if (data.type === 'thinking') {
@@ -82,71 +109,123 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
       } else if (data.type === 'done') {
         setChat(prev => {
           const filtered = (prev.messages || []).filter(m => m.type !== 'thinking');
-          return { ...prev, messages: [...filtered, { role: 'agent', content: data.response, type: 'text' }] };
+          return { ...prev, messages: [...filtered, { role: 'agent', content: data.response, type: 'text', elapsed: data.elapsed }] };
         });
         setIsProcessing(false);
+        refreshConversations();
       }
     };
 
-    ws.onclose = () => { wsRef.current = null; };
-    wsRef.current = ws;
-  };
+    ws.onclose = () => {
+      wsRef.current = null;
+      if (!isIntentionalClose.current) {
+        reconnectTimer.current = setTimeout(() => {
+          if (!appHot.current) return;
+          reconnectAttempts.current += 1;
+          connectWsRef.current(currentParams.current.sid, currentParams.current.e, currentParams.current.a, currentParams.current.m);
+        }, Math.min(1000 * Math.pow(1.5, reconnectAttempts.current), 8000));
+      } else {
+        isIntentionalClose.current = false;
+      }
+    };
 
-  const appendMsg = (msg) => {
-    setChat(prev => ({ ...prev, messages: [...(prev.messages || []), msg] }));
-  };
+    ws.onerror = () => {
+      try { ws.close(); } catch {}
+    };
+
+    wsRef.current = ws;
+  }, [activeProject, appendMsg, refreshConversations, setChat]);
+  connectWsRef.current = connectWs;
+
+  const startNewWs = useCallback((sid, e, a, m) => {
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    reconnectAttempts.current = 0;
+    isIntentionalClose.current = true;
+    if (wsRef.current) { try { wsRef.current.close(); } catch {} }
+    wsRef.current = null;
+    connectWs(sid, e, a, m);
+  }, [connectWs]);
 
   useEffect(() => {
-    // On mount / project change: resume an existing chat session for this
-    // project (from a prior tab switch or page reload), else start fresh.
-    const chatForProject = chat.project === activeProject;
-    if (chatForProject && chat.sessionId) {
+    appHot.current = true;
+    // Resume the persisted session for this project, else start a fresh chat.
+    if (chat.project === activeProject && chat.sessionId) {
       connectWs(chat.sessionId, chat.engine || 'antigravity', chat.agent || 'code-fixer', chat.model || '');
+    } else if (chat.project === activeProject && chat.messages?.length > 0) {
+      startNewWs('', chat.engine || 'antigravity', chat.agent || 'code-fixer', chat.model || '');
     } else {
       connectWs('', 'antigravity', 'code-fixer', '');
     }
+    return () => {
+      appHot.current = false;
+      isIntentionalClose.current = true;
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (wsRef.current) { try { wsRef.current.close(); } catch {} }
+      wsRef.current = null;
+    };
   }, [activeProject, token]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const loadSessions = () => {
-    fetch(`/api/sessions?project=${encodeURIComponent(activeProject)}&limit=30`, {
+  useEffect(() => {
+    if (showSidebar) refreshConversations();
+  }, [showSidebar, activeProject]);
+
+  // Poll for running-state changes while processing (server may finish elsewhere).
+  useEffect(() => {
+    if (!isProcessing) return;
+    const t = setInterval(refreshConversations, 5000);
+    return () => clearInterval(t);
+  }, [isProcessing]);
+
+  const newChat = () => {
+    isIntentionalClose.current = true;
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    if (wsRef.current) { try { wsRef.current.close(); } catch {} }
+    wsRef.current = null;
+    setChat({ project: activeProject, sessionId: '', messages: [], engine, agent, model, selectedFile: '' });
+    setAttachments([]);
+    setIsProcessing(false);
+    refreshConversations();
+    connectWs('', engine, agent, model);
+  };
+
+  const resumeChat = (c) => {
+    isIntentionalClose.current = true;
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    if (wsRef.current) { try { wsRef.current.close(); } catch {} }
+    wsRef.current = null;
+    setChat({ project: activeProject, sessionId: c.id, messages: [], engine: c.engine || 'antigravity', agent: c.agent || 'code-fixer', model: c.model || '', selectedFile: '' });
+    setAttachments([]);
+    setIsProcessing(c.running);
+    connectWs(c.id, c.engine || 'antigravity', c.agent || 'code-fixer', c.model || '');
+  };
+
+  const deleteChat = (e, c) => {
+    e.stopPropagation();
+    fetch(`/api/sessions/${c.id}`, {
+      method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then(r => r.json())
-      .then(setSessions)
+      .then(async () => {
+        refreshConversations();
+        if (c.id === sessionId) {
+          newChat();
+        }
+      })
       .catch(() => {});
   };
-
-  const resumeSession = (sid) => {
-    const s = sessions.find(x => x.id === sid);
-    if (s) connectWs(sid, s.engine || 'antigravity', s.agent || 'code-fixer', s.model || '');
-    setShowHistory(false);
-  };
-
-  const newSession = () => {
-    connectWs('', engine, agent, model);
-    setChat({ project: activeProject, sessionId: '', messages: [], engine, agent, model });
-    setShowHistory(false);
-    setAttachments([]);
-    pendingAttachments.current = [];
-  };
-
-  useEffect(() => { if (showHistory) loadSessions(); }, [showHistory, activeProject]);
 
   const pickFiles = () => fileInputRef.current?.click();
 
   const handleFileSelect = (e) => {
     const files = Array.from(e.target.files || []);
-    const reader = new FileReader();
     let i = 0;
     const readNext = () => {
       if (i >= files.length) { e.target.value = ''; return; }
       const f = files[i];
-
-      // Send file data over WS (base64) for persistence
       const fr = new FileReader();
       fr.onload = () => {
         const dataUrl = fr.result;
@@ -157,9 +236,7 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
         setAttachments(prev => [...prev, attachment]);
 
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'attachment', name: f.name, mime, data: base64,
-          }));
+          wsRef.current.send(JSON.stringify({ type: 'attachment', name: f.name, mime, data: base64 }));
         }
         i++;
         readNext();
@@ -169,11 +246,6 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
     readNext();
   };
 
-  const removeAttachment = (idx) => {
-    setAttachments(prev => prev.filter((_, i) => i !== idx));
-    pendingAttachments.current = pendingAttachments.current.filter((_, i) => i !== idx);
-  };
-
   const sendPrompt = (text) => {
     const final = (text || '').trim();
     if ((!final && attachments.length === 0) || isProcessing) return;
@@ -181,21 +253,12 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
 
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       connectWs(sessionId, engine, agent, model);
-      setTimeout(() => sendPrompt(text), 600);
+      setTimeout(() => { if (!isProcessing) sendPrompt(text); }, 800);
       return;
     }
 
-    const payload = final + attachmentNote;
-    appendMsg({ role: 'user', content: payload, type: 'text' });
-
-    // Attach pending file/image metadata if not yet sent
-    if (pendingAttachments.current.length) {
-      const note = pendingAttachments.current.map(a => `- ${a.name} (${a.mime})`).join('\n');
-      appendMsg({ role: 'user', type: 'attachment_note', content: note });
-      pendingAttachments.current = [];
-    }
-
-    wsRef.current.send(JSON.stringify({ type: 'prompt', content: payload, engine, agent, model }));
+    appendMsg({ role: 'user', content: final + attachmentNote, type: 'text' });
+    wsRef.current.send(JSON.stringify({ type: 'prompt', content: final + attachmentNote, engine, agent, model }));
     setInput('');
     setAttachments([]);
     setIsProcessing(true);
@@ -223,7 +286,7 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
             : msg.type === 'thinking' ? 'bg-dark-800 text-slate-400 text-sm flex items-center gap-2 italic rounded-bl-sm'
             : 'bg-dark-800 text-slate-200 rounded-bl-sm border border-dark-700'
         }`}>
-          {msg.type === 'thinking' && <Loader2 size={14} className="animate-spin" />}
+          {msg.type === 'thinking' && <Loader2 size={14} className="animate-spin shrink-0" />}
           {msg.type === 'attachment' && isImage && msg.extra?.url && (
             <div className="flex flex-col gap-2 w-64">
               <span className="text-xs flex items-center gap-1.5"><FileIcon size={13} /> {msg.content}</span>
@@ -233,10 +296,7 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
           {msg.type === 'attachment' && !isImage && (
             <span className="text-xs flex items-center gap-1.5"><FileText size={13} /> {msg.content}</span>
           )}
-          {msg.type === 'attachment_note' && (
-            <span className="text-xs text-slate-400 whitespace-pre-line">{msg.content}</span>
-          )}
-          {msg.type !== 'attachment' && msg.type !== 'attachment_note' && (
+          {msg.type !== 'attachment' && (
             msg.type === 'diff' ? (
               <div>
                 <div className="bg-dark-800 px-3 py-1.5 text-xs font-mono text-slate-400 border-b border-dark-700">{msg.file}</div>
@@ -265,56 +325,93 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
 
   return (
     <div className="h-full flex flex-col relative">
-      {/* Toolbar */}
+      {/* Top toolbar */}
       <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-dark-800 bg-dark-900/80 overflow-x-auto">
-        <button onClick={() => { setShowExplorer(v => !v); setShowHistory(false); }}
+        <button onClick={() => setShowSidebar(v => !v)}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs bg-dark-800 text-slate-300 hover:text-white border border-dark-700">
+          <Plus size={13} className={showSidebar ? 'rotate-45 transition-transform' : 'transition-transform'} />
+          {showSidebar ? 'Hide history' : 'Chat history'}
+        </button>
+        <button onClick={() => { setShowExplorer(v => !v); }}
           className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs whitespace-nowrap transition-colors ${showExplorer ? 'bg-brand-500/15 text-brand-400 border border-brand-500' : 'bg-dark-800 text-slate-300 hover:text-white border border-dark-700'}`}>
           <FolderOpen size={13} /> Explorer
         </button>
-        <button onClick={() => { setShowHistory(v => !v); setShowExplorer(false); loadSessions(); }}
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs whitespace-nowrap transition-colors ${showHistory ? 'bg-brand-500/15 text-brand-400 border border-brand-500' : 'bg-dark-800 text-slate-300 hover:text-white border border-dark-700'}`}>
-          <History size={13} /> History
-        </button>
-        <button onClick={newSession}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs bg-dark-800 text-slate-300 hover:text-white border border-dark-700 whitespace-nowrap">
-          <X size={13} /> New session
-        </button>
         <div className="flex-1" />
-        <span className="text-[10px] font-mono text-slate-500 truncate max-w-[150px]">
-          {sessionId ? `session: ${sessionId}` : 'new session'}
-        </span>
+        <div className="flex items-center gap-2">
+          {engine === 'opencode' && <Bot size={13} className="text-brand-400" />}
+          {engine === 'antigravity' && <Boxes size={13} className="text-brand-400" />}
+          {isProcessing && <Loader2 size={13} className="animate-spin text-amber-400" />}
+          <span className="text-[10px] font-mono text-slate-500 truncate max-w-[160px]">
+            {sessionId ? sessionId : 'new chat'}
+          </span>
+        </div>
       </div>
 
       <div className="flex-1 flex overflow-hidden min-h-0">
-        {(showExplorer || showHistory) && (
+        {/* Chat-history sidebar (Claude/Gemini style) */}
+        {showSidebar && (
           <div className="w-64 shrink-0 border-r border-dark-800 bg-dark-900 flex flex-col min-h-0">
-            {showExplorer && (
-              <FileExplorer token={token} project={activeProject}
-                selectedFile={selectedFile}
-                onSelectFile={(p) => setChat(prev => ({ ...prev, selectedFile: p }))} />
-            )}
-            {showHistory && (
-              <div className="flex flex-col h-full">
-                <div className="px-3 py-2 border-b border-dark-800 text-xs font-semibold text-slate-400">Sessions</div>
-                <div className="flex-1 overflow-y-auto">
-                  {sessions.length === 0 && <p className="text-xs text-slate-500 p-3">No saved sessions yet.</p>}
-                  {sessions.map(s => (
-                    <button key={s.id} onClick={() => resumeSession(s.id)}
-                      className={`w-full text-left px-3 py-2 hover:bg-dark-800 border-b border-dark-800/50 ${s.id === sessionId ? 'bg-brand-500/10' : ''}`}>
-                      <span className="block text-xs font-medium text-slate-300 truncate">{s.title || `${s.project} · ${s.engine}`}</span>
-                      <span className="block text-[10px] text-slate-500 mt-0.5">{s.agent} · {new Date(s.updated_at * 1000).toLocaleString()}</span>
+            <div className="p-2 border-b border-dark-800">
+              <button onClick={newChat}
+                className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-brand-500 hover:bg-brand-400 text-dark-900 text-sm font-semibold transition-colors">
+                <SquarePen size={15} /> New Chat
+              </button>
+            </div>
+            <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-slate-500 border-b border-dark-800 flex items-center justify-between">
+              <span>Chats</span>
+              <button onClick={refreshConversations} className="text-slate-500 hover:text-brand-400"><RotateCcw size={12} /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {conversations.length === 0 && (
+                <p className="text-xs text-slate-500 p-3">No chats yet. Start a new chat to get going.</p>
+              )}
+              {conversations.map(c => (
+                <div key={c.id}
+                  onClick={() => resumeChat(c)}
+                  className={`group cursor-pointer px-3 py-2.5 border-b border-dark-800/60 hover:bg-dark-800/60 transition-colors ${c.id === sessionId ? 'bg-brand-500/10' : ''}`}>
+                  <div className="flex items-center gap-2 mb-1">
+                    {c.running ? (
+                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                    ) : (
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${c.engine === 'opencode' ? 'bg-brand-400' : 'bg-slate-600'}`} />
+                    )}
+                    <span className={`text-xs font-medium truncate flex-1 ${c.id === sessionId ? 'text-brand-300' : 'text-slate-300'}`}>
+                      {c.title || c.last_message?.slice(0, 40) || 'Untitled chat'}
+                    </span>
+                    <button onClick={(e) => deleteChat(e, c)}
+                      className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 transition-opacity">
+                      <Trash2 size={12} />
                     </button>
-                  ))}
+                  </div>
+                  {c.last_message && (
+                    <p className="text-[10px] text-slate-500 truncate ml-4">{c.last_message}</p>
+                  )}
+                  <div className="flex items-center gap-2 ml-4 mt-0.5">
+                    <span className="text-[9px] text-slate-600">{timeAgo(c.updated_at)}</span>
+                    <span className="text-[9px] uppercase tracking-wide text-slate-600">
+                      {c.engine === 'opencode' ? 'OpenCode' : 'AntiGravity'} · {c.agent || c.model || ''}
+                    </span>
+                    {c.running && <span className="text-[9px] text-amber-400">running</span>}
+                  </div>
                 </div>
-              </div>
-            )}
+              ))}
+            </div>
           </div>
         )}
 
-        {/* Main area */}
+        {/* File explorer panel */}
+        {showExplorer && (
+          <div className="w-64 shrink-0 border-r border-dark-800 bg-dark-900 flex flex-col min-h-0">
+            <FileExplorer token={token} project={activeProject}
+              selectedFile={selectedFile}
+              onSelectFile={(p) => setChat(prev => ({ ...prev, selectedFile: p }))} />
+          </div>
+        )}
+
+        {/* Main chat area */}
         <div className="flex-1 flex flex-col min-w-0">
-          <div className="shrink-0 px-3 pt-2 pb-1">
-            <EngineSelector token={token} engine={engine} onEngineChange={(e) => setChat(prev => ({ ...prev, engine: e, model: e === 'opencode' ? (prev.model || '') : '' }))}
+          <div className="shrink-0 px-3 pt-2 pb-1 overflow-y-auto max-h-[38%]">
+            <EngineSelector token={token} engine={engine} onEngineChange={(e) => setChat(prev => ({ ...prev, engine: e }))}
               agent={agent} onAgentChange={(a) => setChat(prev => ({ ...prev, agent: a }))}
               model={model} onModelChange={(m) => setChat(prev => ({ ...prev, model: m }))} />
             {selectedFile && (
@@ -324,28 +421,27 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
                 <button onClick={() => setChat(prev => ({ ...prev, selectedFile: '' }))} className="text-slate-400 hover:text-white"><X size={13} /></button>
               </div>
             )}
-            {/* Uploaded attachments preview */}
             {attachments.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {attachments.map((a, i) => (
                   <div key={i} className="flex items-center gap-1.5 bg-dark-800 border border-dark-600 rounded-lg px-2 py-1">
                     {a.is_image ? <FileIcon size={12} className="text-brand-400" /> : <FileText size={12} className="text-slate-400" />}
                     <span className="text-[10px] text-slate-300 truncate max-w-[100px]">{a.name}</span>
-                    <button onClick={() => removeAttachment(i)} className="text-slate-400 hover:text-red-400"><XCircle size={12} /></button>
+                    <button onClick={() => setAttachments(prev => prev.filter((_, j) => j !== i))} className="text-slate-400 hover:text-red-400"><XCircle size={12} /></button>
                   </div>
                 ))}
               </div>
             )}
-            <div className="mt-2"><UsageMeter engine={engine} agent={agent} /></div>
+            {engine === 'antigravity' && <div className="mt-2"><UsageMeter engine={engine} agent={agent} /></div>}
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
             {messages.length === 0 && (
               <div className="h-full flex flex-col items-center justify-center text-center px-4">
                 <Cpu size={48} className="text-brand-500/20 mb-4" />
-                <h3 className="text-xl font-bold mb-2">Agent Ready</h3>
-                <p className="text-sm text-slate-400 max-w-[250px]">
-                  Connected to {activeProject}. Pick an engine/agent, attach files, then send a prompt.
+                <h3 className="text-xl font-bold mb-2">Start a new chat</h3>
+                <p className="text-sm text-slate-400 max-w-[260px]">
+                  Pick an engine/agent, attach files, then send a prompt. Your chat history is saved automatically.
                 </p>
               </div>
             )}
@@ -390,6 +486,15 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
 
 function safeParse(s) {
   try { return JSON.parse(s); } catch { return null; }
+}
+
+function timeAgo(ts) {
+  if (!ts) return '';
+  const diff = Date.now() / 1000 - ts;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 export default PromptConsole;

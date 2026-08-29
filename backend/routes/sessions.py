@@ -32,6 +32,11 @@ def api_list_sessions(project: Optional[str] = None, limit: int = 50):
     return session_store.list_sessions(project=project, limit=limit)
 
 
+@router.get("/conversations")
+def api_list_conversations(project: Optional[str] = None, limit: int = 50):
+    return session_store.list_conversations(project=project, limit=limit)
+
+
 @router.get("/{session_id}")
 def api_get_session(session_id: str):
     s = session_store.get_session(session_id)
