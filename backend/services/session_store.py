@@ -45,7 +45,8 @@ def list_sessions(project: str | None = None, limit: int = 50) -> list:
 
 def list_conversations(project: str | None = None, limit: int = 50) -> list:
     """Conversations like a chat history panel: title, time, engine/agent,
-    and a preview of the last user/agent text plus whether a run is active."""
+    and a preview of the last user/agent text plus whether a run is active.
+    Only returns sessions that actually contain messages (a real chat)."""
     cur = get_conn().execute(
         "SELECT s.*, "
         "r.status AS run_status, r.started_at AS run_started_at, "
@@ -56,6 +57,7 @@ def list_conversations(project: str | None = None, limit: int = 50) -> list:
         "              WHERE r2.session_id = s.id "
         "              ORDER BY r2.started_at DESC LIMIT 1) "
         "WHERE (? IS NULL OR s.project = ?) "
+        "AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id) "
         "ORDER BY s.updated_at DESC LIMIT ?",
         (project if project else None, project if project else None, limit),
     )

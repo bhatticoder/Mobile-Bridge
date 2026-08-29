@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, Loader2, FolderOpen, X, Cpu, Paperclip, FileText, File as FileIcon, XCircle, Plus, Trash2, SquarePen, Bot, Boxes, RotateCcw } from 'lucide-react';
+import { Send, Loader2, FolderOpen, X, Cpu, Paperclip, FileText, File as FileIcon, XCircle, Plus, Trash2, SquarePen, Bot, Boxes, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { EngineSelector, FileExplorer, UsageMeter } from '../components/EnginePanel';
 
@@ -8,7 +8,8 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [wsError, setWsError] = useState('');
   const [showExplorer, setShowExplorer] = useState(false);
-  const [showSidebar, setShowSidebar] = useState(true);
+  const [showSidebar, setShowSidebar] = useState(window.innerWidth >= 768);
+  const [engineCfgOpen, setEngineCfgOpen] = useState(window.innerWidth >= 768);
   const [conversations, setConversations] = useState([]);
   const [attachments, setAttachments] = useState([]);
   const wsRef = useRef(null);
@@ -136,6 +137,17 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
     wsRef.current = ws;
   }, [activeProject, appendMsg, refreshConversations, setChat]);
   connectWsRef.current = connectWs;
+
+  // Keep the reconnect params in sync with the live engine/agent/model choice,
+  // so switching agents mid-chat is honoured by the next prompt + reconnect.
+  useEffect(() => {
+    currentParams.current = {
+      sid: currentParams.current.sid,
+      e: engine,
+      a: agent,
+      m: model,
+    };
+  }, [engine, agent, model]);
 
   const startNewWs = useCallback((sid, e, a, m) => {
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
@@ -347,10 +359,15 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden min-h-0">
-        {/* Chat-history sidebar (Claude/Gemini style) */}
+      <div className="flex-1 flex overflow-hidden min-h-0 relative">
+        {/* Mobile backdrop for the drawers */}
+        {showSidebar && window.innerWidth < 768 && (
+          <div className="absolute inset-0 z-20 bg-black/60 md:hidden" onClick={() => setShowSidebar(false)} />
+        )}
+
+        {/* Chat-history sidebar (Claude/Gemini style) — drawer on mobile */}
         {showSidebar && (
-          <div className="w-64 shrink-0 border-r border-dark-800 bg-dark-900 flex flex-col min-h-0">
+          <div className="absolute inset-y-0 left-0 z-30 flex w-80 max-w-[85vw] shrink-0 border-r border-dark-800 bg-dark-900 flex-col min-h-0 md:relative md:z-auto md:w-64 md:max-w-none">
             <div className="p-2 border-b border-dark-800">
               <button onClick={newChat}
                 className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-brand-500 hover:bg-brand-400 text-dark-900 text-sm font-semibold transition-colors">
@@ -379,8 +396,8 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
                       {c.title || c.last_message?.slice(0, 40) || 'Untitled chat'}
                     </span>
                     <button onClick={(e) => deleteChat(e, c)}
-                      className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 transition-opacity">
-                      <Trash2 size={12} />
+                      className="opacity-60 group-hover:opacity-100 text-slate-500 hover:text-red-400 transition-opacity p-1 -m-1">
+                      <Trash2 size={13} />
                     </button>
                   </div>
                   {c.last_message && (
@@ -399,9 +416,12 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
           </div>
         )}
 
-        {/* File explorer panel */}
+        {/* File explorer panel — drawer on mobile */}
         {showExplorer && (
-          <div className="w-64 shrink-0 border-r border-dark-800 bg-dark-900 flex flex-col min-h-0">
+          <div className="absolute inset-y-0 right-0 z-30 flex w-80 max-w-[85vw] shrink-0 border-l border-dark-800 bg-dark-900 flex-col min-h-0 md:relative md:z-auto md:w-64 md:border-r md:border-l-0">
+            <div className="md:hidden p-2 border-b border-dark-800 flex justify-end">
+              <button onClick={() => setShowExplorer(false)} className="text-slate-400 hover:text-white"><X size={16} /></button>
+            </div>
             <FileExplorer token={token} project={activeProject}
               selectedFile={selectedFile}
               onSelectFile={(p) => setChat(prev => ({ ...prev, selectedFile: p }))} />
@@ -411,9 +431,28 @@ function PromptConsole({ token, activeProject, chat, setChat }) {
         {/* Main chat area */}
         <div className="flex-1 flex flex-col min-w-0">
           <div className="shrink-0 px-3 pt-2 pb-1 overflow-y-auto max-h-[38%]">
-            <EngineSelector token={token} engine={engine} onEngineChange={(e) => setChat(prev => ({ ...prev, engine: e }))}
-              agent={agent} onAgentChange={(a) => setChat(prev => ({ ...prev, agent: a }))}
-              model={model} onModelChange={(m) => setChat(prev => ({ ...prev, model: m }))} />
+            <div className="md:hidden">
+              <button onClick={() => setEngineCfgOpen(v => !v)}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-dark-800 border border-dark-700 text-left">
+                <span className="flex items-center gap-2">
+                  {engine === 'opencode' ? <Bot size={14} className="text-brand-400" /> : <Boxes size={14} className="text-brand-400" />}
+                  <span className="text-xs font-medium">{engine === 'opencode' ? (model || 'OpenCode model') : (agent || 'AntiGravity agent')}</span>
+                </span>
+                {engineCfgOpen ? <ChevronUp size={14} className="text-slate-500" /> : <ChevronDown size={14} className="text-slate-500" />}
+              </button>
+              {engineCfgOpen && (
+                <div className="mt-2">
+                  <EngineSelector token={token} engine={engine} onEngineChange={(e) => setChat(prev => ({ ...prev, engine: e }))}
+                    agent={agent} onAgentChange={(a) => setChat(prev => ({ ...prev, agent: a }))}
+                    model={model} onModelChange={(m) => setChat(prev => ({ ...prev, model: m }))} />
+                </div>
+              )}
+            </div>
+            <div className="hidden md:block">
+              <EngineSelector token={token} engine={engine} onEngineChange={(e) => setChat(prev => ({ ...prev, engine: e }))}
+                agent={agent} onAgentChange={(a) => setChat(prev => ({ ...prev, agent: a }))}
+                model={model} onModelChange={(m) => setChat(prev => ({ ...prev, model: m }))} />
+            </div>
             {selectedFile && (
               <div className="mt-2 flex items-center gap-2 bg-brand-500/10 border border-brand-500/30 rounded-lg px-3 py-1.5">
                 <FolderOpen size={13} className="text-brand-400" />
